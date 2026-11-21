@@ -1,0 +1,19 @@
+{
+ "patient": "chb01_pre63",
+ "model": "dcsa",
+ "n_events": 7,
+ "refractory_min": 30.0,
+ "rearm": true,
+ "min_preictal": 300,
+ "event_sensitivity": 1.0,
+ "fpr_per_h": 0.4174477707129467,
+ "mean_warning_min": 54.86190476190476,
+ "pooled_window_metrics": {
+  "ACC": 0.8837240892173109,
+  "SEN": 0.9554285714285714,
+  "SPE": 0.8534101231084398,
+  "AUC": 0.9428648256630988,
+  "n_pre": 21875,
+  "n_inter": 51743
+ }
+}

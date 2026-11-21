@@ -37,12 +37,18 @@ def main():
     ap.add_argument("features")
     ap.add_argument("--index", default="index", help="folder with <patient>_seizures.csv")
     ap.add_argument("--model", default="dcsa")
-    ap.add_argument("--min-preictal", type=int, default=900,
+    ap.add_argument("--min-preictal", type=int, default=300,
                     help="a seizure is usable if it has at least this many preictal windows")
+    ap.add_argument("--only-seizures", type=int, nargs="+", default=None,
+                    help="use exactly these seizure ids (keeps the interictal test blocks "
+                         "identical across runs, e.g. across a preictal sweep)")
     ap.add_argument("--vote-window", type=int, default=30)
     ap.add_argument("--vote-k", type=int, default=10)
     ap.add_argument("--refractory-min", type=float, default=0,
                     help="ignore new alarms this long after one (paper: not stated)")
+    ap.add_argument("--rearm", action="store_true",
+                    help="with --refractory-min: a sustained alarm re-fires every "
+                         "refractory period instead of counting once (fairer FPR/h)")
     ap.add_argument("--epochs", type=int, default=100)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", default="results")
@@ -58,6 +64,11 @@ def main():
     usable = sorted(int(s) for s in counts.index if counts[s] >= args.min_preictal)
     print(f"{patient}: {len(counts)} seizures with preictal data, "
           f"{len(usable)} usable (>= {args.min_preictal} windows): {usable}")
+    if args.only_seizures is not None:
+        missing = [q for q in args.only_seizures if q not in usable]
+        if missing:
+            raise SystemExit(f"--only-seizures {missing} are not usable here")
+        usable = sorted(args.only_seizures)
     if len(usable) < 3:
         raise SystemExit("need at least 3 usable seizures (the paper's inclusion rule)")
 
@@ -96,7 +107,7 @@ def main():
         fa = 0
         for seg in split_segments(ti, max_gap=1):
             fa += len(alarms(ti[seg], pi[seg], args.vote_window, args.vote_k,
-                             int(args.refractory_min * 60)))
+                             int(args.refractory_min * 60), args.rearm))
         hours = len(ti) / 3600
         false_alarms += fa
         inter_hours += hours
@@ -108,6 +119,8 @@ def main():
 
     res = pd.DataFrame(rows)
     summary = dict(patient=patient, model=args.model, n_events=len(res),
+                   refractory_min=args.refractory_min, rearm=args.rearm,
+                   min_preictal=args.min_preictal,
                    event_sensitivity=float(res.detected.mean()),
                    fpr_per_h=false_alarms / inter_hours if inter_hours else float("nan"),
                    mean_warning_min=float(res.warning_min.mean()),

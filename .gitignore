@@ -1,3 +1,18 @@
 punit.pdf
 nld_seizure.pdf
 seizure_repo/features
+.venv/
+.idea/
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+
+# Datasets, extracted features, and archives
+seizure_repo/features/
+seizure_repo/chb*/
+*.edf
+*.seizures
+*.npz
+*.zip
+EOF

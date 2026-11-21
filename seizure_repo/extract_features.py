@@ -104,31 +104,45 @@ def main():
 
     cache = os.path.join(args.out, p)
     os.makedirs(cache, exist_ok=True)
-    parts = []
+    Xs, ys, sids, ts, recs = [], [], [], [], []
     for fname, rows in idx.groupby("file", sort=False):
         cfile = os.path.join(cache, fname.replace(".edf", ".npz"))
+        # The per-recording cache holds ONLY features, keyed by window time. Labels always
+        # come from the current index, so re-running with a different preictal definition
+        # can never pick up stale labels. (The old cache stored y / seizure_id too and
+        # silently reused them.) Old caches still work: only abs_time_s and X are read.
+        c_t, c_X = np.zeros(0, dtype=np.int64), np.zeros((0, 432), dtype=np.float32)
         if os.path.exists(cfile):
-            parts.append(cfile)
-            continue
-        t = time.time()
-        labels, data = read_edf(os.path.join(args.root, p, fname))
-        x = preprocess(pick_channels(labels, data))
-        starts = rows.start_sample.to_numpy()
-        ok = starts + FS <= x.shape[1]
-        rows, starts = rows[ok], starts[ok]
-        wins = np.stack([x[:, s:s + FS] for s in starts])          # (n, 18, 256)
-        X = windows_to_features(wins, n_jobs=args.jobs).astype(np.float32)
-        np.savez(cfile, X=X, y=rows.label.to_numpy(),
-                 seizure_id=rows.seizure_id.to_numpy(),
-                 abs_time_s=rows.abs_time_s.to_numpy(),
-                 recording=np.array([fname] * len(rows)))
-        parts.append(cfile)
-        print(f"  {fname}: {len(rows)} windows in {time.time() - t:.0f}s")
+            c = np.load(cfile)
+            c_t, c_X = c["abs_time_s"].astype(np.int64), c["X"]
+        need = rows[~rows.abs_time_s.isin(c_t)]
+        if len(need):
+            t = time.time()
+            labels, data = read_edf(os.path.join(args.root, p, fname))
+            x = preprocess(pick_channels(labels, data))
+            starts = need.start_sample.to_numpy()
+            ok = starts + FS <= x.shape[1]
+            need, starts = need[ok], starts[ok]
+            if len(need):
+                wins = np.stack([x[:, s:s + FS] for s in starts])      # (n, 18, 256)
+                Xn = windows_to_features(wins, n_jobs=args.jobs).astype(np.float32)
+                c_t = np.concatenate([c_t, need.abs_time_s.to_numpy().astype(np.int64)])
+                c_X = np.concatenate([c_X, Xn])
+                np.savez(cfile, X=c_X, abs_time_s=c_t)
+            print(f"  {fname}: {len(need)} new windows in {time.time() - t:.0f}s "
+                  f"({len(rows) - len(need)} from cache)")
+        pos = pd.Series(np.arange(len(c_t)), index=c_t)
+        keep = rows.abs_time_s.isin(c_t).to_numpy()
+        rows = rows[keep]
+        Xs.append(c_X[pos.loc[rows.abs_time_s.to_numpy()].to_numpy()])
+        ys.append(rows.label.to_numpy()); sids.append(rows.seizure_id.to_numpy())
+        ts.append(rows.abs_time_s.to_numpy()); recs.append(np.array([fname] * len(rows)))
 
-    out = {k: np.concatenate([np.load(c)[k] for c in parts])
-           for k in ["X", "y", "seizure_id", "abs_time_s", "recording"]}
+    out = dict(X=np.concatenate(Xs), y=np.concatenate(ys), seizure_id=np.concatenate(sids),
+               abs_time_s=np.concatenate(ts), recording=np.concatenate(recs))
     np.savez(os.path.join(args.out, f"{p}.npz"), **out)
-    print(f"saved {args.out}/{p}.npz  X={out['X'].shape}")
+    print(f"saved {args.out}/{p}.npz  X={out['X'].shape}  "
+          f"({(out['y'] == 1).sum()} preictal, {(out['y'] == 0).sum()} interictal)")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ loading features, scaling, the models (DC-SA-EBiLSTM via PyTorch, SVM/KNN via
 scikit-learn), window-level metrics, and the 10-of-30 alarm rule.
 """
 import copy
+import os
 import time
 
 import numpy as np
@@ -54,12 +55,11 @@ def window_metrics(y, prob, thr=0.5):
 
 
 # ---------------------------------------------------------------- alarm rule
-def alarms(times, pred, win=30, k=10, refractory_s=0):
+def alarms(times, pred, win=30, k=10, refractory_s=0, rearm=False):
     """10-of-30 voting. times: window start times (s); pred: 0/1 per window.
     The vote at second t uses windows in (t-win, t]; it is only evaluated once
-    a full `win`-second history exists (this reproduces the paper's earliest
-    possible warning of 32.52 min). Missing seconds count as 'not preictal'.
-    Returns the times at which a new alarm starts."""
+    a full `win`-second history exists. If `rearm=True`, a sustained alarm
+    re-fires every `refractory_s` seconds."""
     if len(times) == 0:
         return np.array([], dtype=int)
     t0 = int(times.min())
@@ -68,14 +68,25 @@ def alarms(times, pred, win=30, k=10, refractory_s=0):
     votes = np.convolve(line, np.ones(win), mode="full")[:len(line)]
     on = votes >= k
     on[:win - 1] = False
-    starts = np.flatnonzero(on & ~np.r_[False, on[:-1]]) + t0
-    if refractory_s and len(starts):
-        kept = [starts[0]]
-        for s in starts[1:]:
-            if s - kept[-1] >= refractory_s:
-                kept.append(s)
-        starts = np.array(kept)
-    return starts
+    if not refractory_s:
+        return np.flatnonzero(on & ~np.r_[False, on[:-1]]) + t0
+    if not rearm:
+        starts = np.flatnonzero(on & ~np.r_[False, on[:-1]]) + t0
+        if len(starts):
+            kept = [starts[0]]
+            for s in starts[1:]:
+                if s - kept[-1] >= refractory_s:
+                    kept.append(s)
+            starts = np.array(kept)
+        return starts
+    kept = []
+    last = -10**18
+    for idx in np.flatnonzero(on):
+        t = idx + t0
+        if t - last >= refractory_s:
+            kept.append(t)
+            last = t
+    return np.array(kept, dtype=int)
 
 
 def split_segments(times, max_gap=1):
@@ -93,7 +104,7 @@ def fit_predict(name, Xtr, ytr, Xva, yva, Xte, class_weight=False, seed=0,
         from sklearn.svm import SVC
         m = SVC(kernel="rbf", C=10, gamma="scale",
                 class_weight="balanced" if class_weight else None).fit(Xtr, ytr)
-        return 1 / (1 + np.exp(-m.decision_function(Xte)))   # >0.5 <=> class 1
+        return 1 / (1 + np.exp(-m.decision_function(Xte)))
     if name == "knn":
         from sklearn.neighbors import KNeighborsClassifier
         m = KNeighborsClassifier(n_neighbors=5, weights="distance").fit(Xtr, ytr)
@@ -105,15 +116,21 @@ def fit_predict(name, Xtr, ytr, Xva, yva, Xte, class_weight=False, seed=0,
 
 def _device():
     import torch
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    req = os.environ.get("SEIZURE_DEVICE", "").strip().lower()
+    if req:
+        return torch.device(req)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def train_torch(variant, Xtr, ytr, Xva, yva, epochs=100, patience=30, batch=128,
                 lr=1e-3, weight_decay=1e-4, step=80, gamma=0.1,
                 class_weight=False, seed=0, log=print):
     """Paper settings: Adam(lr 1e-3, wd 1e-4), batch 128, <=100 epochs,
-    early stopping (patience 30) on validation, StepLR(80, 0.1).
-    Early stopping monitors validation AUC (the paper doesn't say which metric)."""
+    early stopping (patience 30) on validation, StepLR(80, 0.1)."""
     import torch
     import torch.nn as nn
     from model import ABLATIONS, DCSAEBiLSTM
@@ -132,7 +149,7 @@ def train_torch(variant, Xtr, ytr, Xva, yva, epochs=100, patience=30, batch=128,
 
     ds = torch.utils.data.TensorDataset(torch.from_numpy(Xtr), torch.from_numpy(ytr).long())
     dl = torch.utils.data.DataLoader(ds, batch_size=batch, shuffle=True,
-                                     drop_last=len(ds) > batch)   # BatchNorm needs >1
+                                     drop_last=len(ds) > batch)
     best, best_state, wait = -np.inf, None, 0
     t = time.time()
     for ep in range(epochs):
@@ -168,7 +185,7 @@ def predict_torch(model, X, batch=4096):
     dev = next(model.parameters()).device
     model.eval()
     out = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for i in range(0, len(X), batch):
             xb = torch.from_numpy(X[i:i + batch]).to(dev)
             out.append(torch.softmax(model(xb), dim=1)[:, 1].cpu().numpy())
